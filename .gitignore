@@ -1,0 +1,5 @@
+*.sw[po]
+*~
+.DS_Store
+env
+MNIST-data
