@@ -173,7 +173,7 @@ def main(unused_argv):
   batch_size = 100
   num_gpus = 2
 
-  # Convert to Dataset
+  # input_fn which serves Dataset
   input_fn_provider = InputFnProvider(per_device_batch_size(batch_size, num_gpus))
 
   # Use multiple GPUs by MirroredStragtegy.
@@ -184,8 +184,8 @@ def main(unused_argv):
       distribution = None
   # Pass to RunConfig
   config = tf.estimator.RunConfig(
-    train_distribute=distribution,
-    model_dir="/tmp/mnist_convnet_model")
+      train_distribute=distribution,
+      model_dir="/tmp/mnist_convnet_model")
 
   # Create the Estimator
   # pass RunConfig
