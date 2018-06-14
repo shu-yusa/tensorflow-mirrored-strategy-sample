@@ -115,43 +115,91 @@ def cnn_model_fn(features, labels, mode):
       mode=mode, loss=loss, eval_metric_ops=eval_metric_ops)
 
 
+def per_device_batch_size(batch_size, num_gpus):
+  """For multi-gpu, batch-size must be a multiple of the number of GPUs.
+  Note that this should eventually be handled by DistributionStrategies
+  directly. Multi-GPU support is currently experimental, however,
+  so doing the work here until that feature is in place.
+  Args:
+    batch_size: Global batch size to be divided among devices. This should be
+      equal to num_gpus times the single-GPU batch_size for multi-gpu training.
+    num_gpus: How many GPUs are used with DistributionStrategies.
+  Returns:
+    Batch size per device.
+  Raises:
+    ValueError: if batch_size is not divisible by number of devices
+  """
+  if num_gpus <= 1:
+    return batch_size
+
+  remainder = batch_size % num_gpus
+  if remainder:
+    err = ('When running with multiple GPUs, batch size '
+           'must be a multiple of the number of available GPUs. Found {} '
+           'GPUs with a batch size of {}; try --batch_size={} instead.'
+          ).format(num_gpus, batch_size, batch_size - remainder)
+    raise ValueError(err)
+  return int(batch_size / num_gpus)
+
+
+class InputFnProvider:
+  def __init__(self, train_batch_size):
+    self.train_batch_size = train_batch_size
+    self.__load_data()
+
+  def __load_data(self):
+    # Load training and eval data
+    mnist = tf.contrib.learn.datasets.load_dataset("mnist")
+    self.train_data = mnist.train.images  # Returns np.array
+    self.train_labels = np.asarray(mnist.train.labels, dtype=np.int32)
+    self.eval_data = mnist.test.images  # Returns np.array
+    self.eval_labels = np.asarray(mnist.test.labels, dtype=np.int32)
+
+  def train_input_fn(self):
+    """An input function for training"""
+    # Shuffle, repeat, and batch the examples.
+    dataset = tf.data.Dataset.from_tensor_slices(({"x": self.train_data}, self.train_labels))
+    dataset = dataset.shuffle(1000).repeat().batch(self.train_batch_size)
+    return dataset
+
+  def eval_input_fn(self):
+    """An input function for evaluation or prediction"""
+    dataset = tf.data.Dataset.from_tensor_slices(({"x": self.eval_data}, self.eval_labels))
+    dataset = dataset.batch(1)
+    return dataset
+
+
 def main(unused_argv):
-  # Load training and eval data
-  mnist = tf.contrib.learn.datasets.load_dataset("mnist")
-  train_data = mnist.train.images  # Returns np.array
-  train_labels = np.asarray(mnist.train.labels, dtype=np.int32)
-  eval_data = mnist.test.images  # Returns np.array
-  eval_labels = np.asarray(mnist.test.labels, dtype=np.int32)
+  batch_size = 100
+  num_gpus = 2
+
+  # Convert to Dataset
+  input_fn_provider = InputFnProvider(per_device_batch_size(batch_size, num_gpus))
+
+  # Use multiple GPUs by MirroredStragtegy.
+  # All avaiable GPUs will be used if `num_gpus` is omitted.
+  if num_gpus > 1:
+      distribution = tf.contrib.distribute.MirroredStrategy(num_gpus=num_gpus)
+  else:
+      distribution = None
+  # Pass to RunConfig
+  config = tf.estimator.RunConfig(
+    train_distribute=distribution,
+    model_dir="/tmp/mnist_convnet_model")
 
   # Create the Estimator
+  # pass RunConfig
   mnist_classifier = tf.estimator.Estimator(
-      model_fn=cnn_model_fn, model_dir="/tmp/mnist_convnet_model")
-
-  # Set up logging for predictions
-  # Log the values in the "Softmax" tensor with label "probabilities"
-  tensors_to_log = {"probabilities": "softmax_tensor"}
-  logging_hook = tf.train.LoggingTensorHook(
-      tensors=tensors_to_log, every_n_iter=50)
+      model_fn=cnn_model_fn,
+      config=config)
 
   # Train the model
-  train_input_fn = tf.estimator.inputs.numpy_input_fn(
-      x={"x": train_data},
-      y=train_labels,
-      batch_size=100,
-      num_epochs=None,
-      shuffle=True)
   mnist_classifier.train(
-      input_fn=train_input_fn,
-      steps=20000,
-      hooks=[logging_hook])
+      input_fn=input_fn_provider.train_input_fn,
+      steps=10000)
 
   # Evaluate the model and print results
-  eval_input_fn = tf.estimator.inputs.numpy_input_fn(
-      x={"x": eval_data},
-      y=eval_labels,
-      num_epochs=1,
-      shuffle=False)
-  eval_results = mnist_classifier.evaluate(input_fn=eval_input_fn)
+  eval_results = mnist_classifier.evaluate(input_fn=input_fn_provider.eval_input_fn)
   print(eval_results)
 
 
